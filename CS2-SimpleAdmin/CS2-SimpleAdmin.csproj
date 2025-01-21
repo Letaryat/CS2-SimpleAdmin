@@ -41,4 +41,8 @@
 		</Reference>
 	</ItemGroup>
   
+	<ItemGroup>
+    <ProjectReference Include="3rd_party\src-shared\K4-ArenaSharedApi.csproj" />
+	</ItemGroup>
+
 </Project>

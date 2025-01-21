@@ -17,26 +17,32 @@ using System.Globalization;
 using System.Reflection;
 using CounterStrikeSharp.API.ValveConstants.Protobuf;
 using MenuManager;
+using K4ArenaSharedApi;
+using CounterStrikeSharp.API.Core.Capabilities;
 
 namespace CS2_SimpleAdmin;
 
 public partial class CS2_SimpleAdmin
 {
+
+    public static IK4ArenaSharedApi? SharedAPI_Arena { get; private set; }
+    public (bool ArenaFound, bool Checked) ArenaSupport = (false, false);
+
     [CommandHelper(usage: "[#userid or name]", whoCanExecute: CommandUsage.CLIENT_ONLY)]
     public void OnPenaltiesCommand(CCSPlayerController? caller, CommandInfo command)
     {
         if (caller == null || caller.IsValid == false || !caller.UserId.HasValue || Database == null)
             return;
-        
+
         var userId = caller.UserId.Value;
-        
+
         if (!string.IsNullOrEmpty(command.GetArg(1)) && AdminManager.PlayerHasPermissions(caller, "@css/kick"))
         {
             var targets = GetTarget(command);
-            
+
             if (targets == null)
                 return;
-            
+
             var playersToTarget = targets.Players.Where(player => player is { IsValid: true, IsHLTV: false }).ToList();
             playersToTarget.ForEach(player =>
             {
@@ -141,6 +147,31 @@ public partial class CS2_SimpleAdmin
         });
     }
 
+    public void PerformAFKAction(CCSPlayerController player, bool afk)
+    {
+        if (!ArenaSupport.Checked) // We do check only once, so we basically cache the result
+        {
+            string arenaPath = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "K4-Arenas"));
+            ArenaSupport.ArenaFound = Directory.Exists(arenaPath);
+            ArenaSupport.Checked = true;
+        }
+
+        if (!ArenaSupport.ArenaFound)
+        {
+            // Arena not found, run your own logics here
+            return;
+        }
+
+        if (SharedAPI_Arena is null)
+        {
+            // This section won't be executed if Arena is not found, so wont cause issues from capability not found
+            PluginCapability<IK4ArenaSharedApi> Capability_SharedAPI = new("k4-arenas:sharedapi");
+            SharedAPI_Arena = Capability_SharedAPI.Get();
+        }
+        // Arena found, perform the action
+        SharedAPI_Arena?.PerformAFKAction(player, afk);
+    }
+
     [RequiresPermissions("@css/chat")]
     [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
     public void OnAdminVoiceCommand(CCSPlayerController? caller, CommandInfo command)
@@ -157,7 +188,7 @@ public partial class CS2_SimpleAdmin
                     player.VoiceFlags = VoiceFlags.Muted;
                 }
             }
-            
+
             if (command.GetArg(2).ToLower().Equals("unmuteAll"))
             {
                 foreach (var player in Helper.GetValidPlayers().Where(p => p != caller))
@@ -169,10 +200,10 @@ public partial class CS2_SimpleAdmin
 
             return;
         }
-            
+
         caller.VoiceFlags = caller.VoiceFlags == VoiceFlags.All ? VoiceFlags.Normal : VoiceFlags.All;
     }
-    
+
     [RequiresPermissions("@css/generic")]
     [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
     public void OnAdminCommand(CCSPlayerController? caller, CommandInfo command)
@@ -233,7 +264,7 @@ public partial class CS2_SimpleAdmin
     public static void AddAdmin(CCSPlayerController? caller, string steamid, string name, string flags, int immunity, int time = 0, bool globalAdmin = false, CommandInfo? command = null)
     {
         if (Database == null) return;
-        
+
         var flagsList = flags.Split(',').Select(flag => flag.Trim()).ToList();
         _ = Instance.PermissionManager.AddAdminBySteamId(steamid, name, flagsList, immunity, time, globalAdmin);
 
@@ -404,10 +435,10 @@ public partial class CS2_SimpleAdmin
         {
             await PermissionManager.CrateGroupsJsonFile();
             await PermissionManager.CreateAdminsJsonFile();
-            
+
             var adminsFile = await File.ReadAllTextAsync(Instance.ModuleDirectory + "/data/admins.json");
             var groupsFile = await File.ReadAllTextAsync(Instance.ModuleDirectory + "/data/groups.json");
-            
+
             await Server.NextWorldUpdateAsync(() =>
             {
                 if (!string.IsNullOrEmpty(adminsFile))
@@ -438,6 +469,7 @@ public partial class CS2_SimpleAdmin
             SilentPlayers.Remove(caller.Slot);
             caller.PrintToChat($"You aren't hidden now!");
             caller.ChangeTeam(CsTeam.Spectator);
+            PerformAFKAction(caller, false);
         }
         else
         {
@@ -449,6 +481,7 @@ public partial class CS2_SimpleAdmin
             AddTimer(1.0f, () => { Server.NextFrame(() => caller.ChangeTeam(CsTeam.Spectator)); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
             AddTimer(1.4f, () => { Server.NextFrame(() => caller.ChangeTeam(CsTeam.None)); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
             caller.PrintToChat($"You are hidden now!");
+            PerformAFKAction(caller, true);
             AddTimer(2.0f, () => { Server.NextFrame(() => Server.ExecuteCommand("sv_disable_teamselect_menu 0")); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
         }
     }
@@ -545,7 +578,7 @@ public partial class CS2_SimpleAdmin
                         ReasonMenu.OpenMenu(caller, PenaltyType.Ban, _localizer["sa_reason"], player, (_, _, reason) =>
                         {
                             caller.ExecuteClientCommandFromServer($"css_addban {player.SteamId.SteamId64} {duration} \"{reason}\"");
-                            
+
                             // Determine message keys and arguments based on ban time
                             var (_, activityMessageKey, _, adminActivityArgs) = duration == 0
                                 ? ("sa_player_ban_message_perm", "sa_admin_ban_message_perm",
@@ -560,7 +593,7 @@ public partial class CS2_SimpleAdmin
                             {
                                 Helper.ShowAdminActivity(activityMessageKey, caller.PlayerName, adminActivityArgs);
                             }
-                            
+
                             MenuApi?.CloseMenu(caller);
                         }));
                 });
@@ -570,7 +603,7 @@ public partial class CS2_SimpleAdmin
                         ReasonMenu.OpenMenu(caller, PenaltyType.Mute, _localizer["sa_reason"], player, (_, _, reason) =>
                         {
                             caller.ExecuteClientCommandFromServer($"css_addmute {player.SteamId.SteamId64} {duration} \"{reason}\"");
-                            
+
                             // Determine message keys and arguments based on mute time (permanent or timed)
                             var (_, activityMessageKey, _, adminActivityArgs) = duration == 0
                                 ? ("sa_player_mute_message_perm", "sa_admin_mute_message_perm",
@@ -585,7 +618,7 @@ public partial class CS2_SimpleAdmin
                             {
                                 Helper.ShowAdminActivity(activityMessageKey, caller.PlayerName, adminActivityArgs);
                             }
-                            
+
                             MenuApi?.CloseMenu(caller);
                         }));
                 });
@@ -595,7 +628,7 @@ public partial class CS2_SimpleAdmin
                         ReasonMenu.OpenMenu(caller, PenaltyType.Mute, _localizer["sa_reason"], player, (_, _, reason) =>
                         {
                             caller.ExecuteClientCommandFromServer($"css_addgag {player.SteamId.SteamId64} {duration} \"{reason}\"");
-                            
+
                             // Determine message keys and arguments based on gag time (permanent or timed)
                             var (_, activityMessageKey, _, adminActivityArgs) = duration == 0
                                 ? ("sa_player_gag_message_perm", "sa_admin_gag_message_perm",
@@ -603,14 +636,14 @@ public partial class CS2_SimpleAdmin
                                     ["CALLER", player.Name, reason])
                                 : ("sa_player_gag_message_time", "sa_admin_gag_message_time",
                                     new object[] { reason, duration, "CALLER" },
-                                    new object[] { "CALLER", player.Name, reason, duration});
+                                    new object[] { "CALLER", player.Name, reason, duration });
 
                             // Display admin activity message to other players
                             if (!SilentPlayers.Contains(caller.Slot))
                             {
                                 Helper.ShowAdminActivity(activityMessageKey, caller.PlayerName, adminActivityArgs);
                             }
-                            
+
                             MenuApi?.CloseMenu(caller);
                         }));
                 });
@@ -620,7 +653,7 @@ public partial class CS2_SimpleAdmin
                         ReasonMenu.OpenMenu(caller, PenaltyType.Mute, _localizer["sa_reason"], player, (_, _, reason) =>
                         {
                             caller.ExecuteClientCommandFromServer($"css_addsilence {player.SteamId.SteamId64} {duration} \"{reason}\"");
-                            
+
                             // Determine message keys and arguments based on silence time (permanent or timed)
                             var (_, activityMessageKey, _, adminActivityArgs) = duration == 0
                                 ? ("sa_player_silence_message_perm", "sa_admin_silence_message_perm",
@@ -635,7 +668,7 @@ public partial class CS2_SimpleAdmin
                             {
                                 Helper.ShowAdminActivity(activityMessageKey, caller.PlayerName, adminActivityArgs);
                             }
-                            
+
                             MenuApi?.CloseMenu(caller);
                         }));
                 });
@@ -739,7 +772,7 @@ public partial class CS2_SimpleAdmin
             var playersJson = JsonConvert.SerializeObject(playersToTarget.Select(player =>
             {
                 var matchStats = player.ActionTrackingServices?.MatchStats;
-                
+
                 return new
                 {
                     player.UserId,
@@ -782,8 +815,8 @@ public partial class CS2_SimpleAdmin
             return;
         }
 
-        var reason = command.ArgCount >= 2 
-            ? string.Join(" ", Enumerable.Range(2, command.ArgCount - 2).Select(command.GetArg)).Trim() 
+        var reason = command.ArgCount >= 2
+            ? string.Join(" ", Enumerable.Range(2, command.ArgCount - 2).Select(command.GetArg)).Trim()
             : _localizer?["sa_unknown"] ?? "Unknown";
 
         reason = string.IsNullOrWhiteSpace(reason) ? _localizer?["sa_unknown"] ?? "Unknown" : reason;
@@ -805,14 +838,14 @@ public partial class CS2_SimpleAdmin
         if (!player.IsValid) return;
         if (!caller.CanTarget(player)) return;
         if (!player.UserId.HasValue) return;
-        
+
         // Set default caller name if not provided
         callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
         reason ??= _localizer?["sa_unknown"] ?? "Unknown";
-        
+
         var playerInfo = PlayersInfo[player.UserId.Value];
         var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.UserId.Value] : null;
-        
+
         // Determine message keys and arguments for the kick notification
         var (messageKey, activityMessageKey, centerArgs, adminActivityArgs) =
             ("sa_player_kick_message", "sa_admin_kick_message",
@@ -839,7 +872,7 @@ public partial class CS2_SimpleAdmin
             Helper.LogCommand(caller, $"css_kick {(string.IsNullOrEmpty(player.PlayerName) ? player.SteamID.ToString() : player.PlayerName)} {reason}");
         else
             Helper.LogCommand(caller, command);
-        
+
         SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Kick, reason, -1, null);
     }
 
@@ -992,7 +1025,7 @@ public partial class CS2_SimpleAdmin
     {
         if (MenuApi == null || caller == null)
             return;
-        
+
         var pluginManager = Helper.GetPluginManager();
         if (pluginManager == null)
         {
@@ -1008,7 +1041,7 @@ public partial class CS2_SimpleAdmin
         }
 
         var pluginsMenu = Helper.CreateMenu(Localizer["sa_menu_pluginsmanager_title"]);
-        
+
         foreach (var plugin in plugins)
         {
             var pluginType = plugin.GetType();
@@ -1022,7 +1055,7 @@ public partial class CS2_SimpleAdmin
             // Access nested properties within "Plugin" (like ModuleName, ModuleVersion, etc.)
             var nestedPlugin = pluginType.GetProperty("Plugin")?.GetValue(plugin);
             if (nestedPlugin == null) continue;
-            
+
             var status = state?.ToUpper() != "UNLOADED" ? "ON" : "OFF";
             var allowedMenuTypes = new[] { "chat", "console" };
 
@@ -1049,10 +1082,10 @@ public partial class CS2_SimpleAdmin
 
                 AddTimer(0.1f, () => OnPluginManagerCommand(caller, commandInfo));
             });
-                
+
             // Console.WriteLine($"[#{pluginId}:{state?.ToUpper()}]: \"{moduleName ?? "Unknown"}\" ({moduleVersion ?? "Unknown"}) by {moduleAuthor}");
         }
-        
+
         pluginsMenu?.Open(caller);
     }
 
